@@ -1,0 +1,23 @@
+services:
+  tailscale-relay:
+    image: tailscale/tailscale:latest
+    container_name: tailscale-relay
+    hostname: vps-relay
+    environment:
+      - TS_AUTHKEY="tskey-auth-YOUR-KEY-HERE"
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+    volumes:
+      - /var/lib/tailscale-relay:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+
+  socat:
+    image: alpine/socat:latest
+    container_name: nextcloud-socat
+    network_mode: "service:tailscale-relay"
+    command: "tcp-listen:39472,fork,reuseaddr tcp-connect:100.x.x.x:8080"
+    restart: unless-stopped

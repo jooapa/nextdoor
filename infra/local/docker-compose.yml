@@ -1,0 +1,69 @@
+services:
+  tailscale-local:
+    image: tailscale/tailscale:latest
+    container_name: tailscale-local
+    hostname: home-nextcloud
+    environment:
+      - TS_AUTHKEY="tskey-auth-YOUR-KEY-HERE"
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+    volumes:
+      - ${HOME}/nextcloud-data/tailscale:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "80:80"
+      - "443:443"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:alpine
+    container_name: nextcloud-caddy
+    restart: unless-stopped
+    network_mode: "service:tailscale-local"
+    volumes:
+      - ${HOME}/nextcloud-data/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - ${HOME}/nextcloud-data/caddy/data:/data
+      - ${HOME}/nextcloud-data/caddy/config:/config
+
+  db:
+    image: mariadb:10.11
+    container_name: nextcloud-db
+    restart: unless-stopped
+    network_mode: "service:tailscale-local"
+    command: --transaction-isolation=READ-COMMITTED --binlog-format=ROW
+    volumes:
+      - ${HOME}/nextcloud-data/db:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=strongest_password_here
+      - MYSQL_PASSWORD=good_ass_password_here
+      - MYSQL_DATABASE=nextcloud
+      - MYSQL_USER=nextcloud
+
+  redis:
+    image: redis:alpine
+    container_name: nextcloud-redis
+    network_mode: "service:tailscale-local"
+    restart: unless-stopped
+
+  app:
+    image: nextcloud:apache
+    container_name: nextcloud-app
+    restart: unless-stopped
+    network_mode: "service:tailscale-local"
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ${HOME}/nextcloud-data/app:/var/www/html
+      - ${HOME}/nextcloud-data/data:/var/www/html/data
+    environment:
+      - APACHE_PORT=8080
+      - MYSQL_HOST=127.0.0.1
+      - MYSQL_DATABASE=nextcloud
+      - MYSQL_USER=nextcloud
+      - MYSQL_PASSWORD=good_ass_password_here
+      - REDIS_HOST=127.0.0.1
+      - NEXTCLOUD_DATA_DIR=/var/www/html/data
