@@ -179,15 +179,15 @@ func run() error {
 	}
 	execOpts.RemoteTarget = currentState.RemoteTarget
 
-	if cfg.Rsync.Enabled || args.Rsync {
+	if (cfg.Rsync.Enabled || args.Rsync) && !cfg.Rsync.SmartMode {
 		if execOpts.Command == "status" {
-			return fmt.Errorf("status command is not supported with rsync")
+			return fmt.Errorf("status command is not supported with dumb rsync")
 		}
 		if execOpts.Command == "sync" {
-			return fmt.Errorf("two-way sync is not natively supported by rsync. Please use 'nextdoor push' or 'nextdoor pull'")
+			return fmt.Errorf("two-way sync is not natively supported by dumb rsync. Please use 'nextdoor push' or 'nextdoor pull'")
 		}
 		
-		fmt.Println("Bypassing WebDAV and using direct SSH/Rsync transfer...")
+		fmt.Println("Bypassing WebDAV and using direct SSH/Rsync transfer (Dumb Mode)...")
 		return rsync.Run(&cfg.Rsync, currentState, execOpts.Command, execOpts.Target, execOpts.NoDelete, scanOpts.Ignores)
 	}
 
@@ -250,7 +250,7 @@ func run() error {
 	plan := sync.Reconcile(currentState, localFiles, remoteFiles)
 
 	fmt.Println("Executing plan...")
-	err = sync.ExecutePlan(client, currentState, plan, execOpts)
+	err = sync.ExecutePlan(client, currentState, plan, execOpts, &cfg.Rsync)
 	if err != nil {
 		return err
 	}

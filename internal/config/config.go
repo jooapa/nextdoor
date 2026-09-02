@@ -18,8 +18,9 @@ type RsyncConfig struct {
 	Enabled   bool   `toml:"enabled"`
 	Host      string `toml:"host"`
 	Port      int    `toml:"port"`
-	User      string `toml:"user"`
-	KeyPath         string `toml:"key_path"`
+	User            string   `toml:"user"`
+	SmartMode       bool     `toml:"smart_mode"`
+	KeyPath         string   `toml:"key_path"`
 	DataDir         string   `toml:"data_dir"`
 	RsyncPath       string   `toml:"rsync_path"`
 	RemoteRsyncPath string   `toml:"remote_rsync_path"`

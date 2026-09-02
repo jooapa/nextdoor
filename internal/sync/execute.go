@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jooapa/nextdoor/internal/config"
 	"github.com/jooapa/nextdoor/internal/utils"
 	"github.com/schollz/progressbar/v3"
 
@@ -30,7 +31,7 @@ type ExecutionOptions struct {
 	Concurrency  int
 }
 
-func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []FilePlan, opts ExecutionOptions) error {
+func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []FilePlan, opts ExecutionOptions, rsyncCfg *config.RsyncConfig) error {
 	var finalPlan []FilePlan
 
 	for _, action := range plan {
@@ -70,8 +71,19 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 				}
 			}
 		}
+
+
 		finalPlan = append(finalPlan, action)
 	}
+
+	if rsyncCfg != nil && rsyncCfg.Enabled && rsyncCfg.SmartMode {
+		return executeSmartRsync(client, currentState, finalPlan, opts, rsyncCfg)
+	}
+
+	return ExecutePlanNormal(client, currentState, finalPlan, opts)
+}
+
+func ExecutePlanNormal(client *gowebdav.Client, currentState *state.State, finalPlan []FilePlan, opts ExecutionOptions) error {
 
 	if opts.Command == "status" || opts.DryRun {
 		if opts.Command == "status" {
