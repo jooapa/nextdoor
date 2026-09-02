@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jooapa/nextdoor/internal/utils"
+	"github.com/schollz/progressbar/v3"
 
 	"github.com/jooapa/nextdoor/internal/local"
 	"github.com/jooapa/nextdoor/internal/nextcloud"
@@ -118,6 +119,36 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 	errCh := make(chan error, len(finalPlan))
 	sem := make(chan struct{}, 15) // Concurrency limit
 
+	var totalTransferSize int64
+	for _, action := range finalPlan {
+		if action.Action == ActionPush && action.LocalInfo != nil {
+			totalTransferSize += action.LocalInfo.Size
+		} else if (action.Action == ActionPull || action.Action == ActionConflict) && action.RemoteInfo != nil {
+			totalTransferSize += action.RemoteInfo.Size
+		}
+	}
+
+	bar := progressbar.NewOptions64(
+		totalTransferSize,
+		progressbar.OptionSetDescription("Syncing"),
+		progressbar.OptionSetWriter(os.Stderr),
+		progressbar.OptionShowBytes(true),
+		progressbar.OptionSetWidth(40),
+		progressbar.OptionThrottle(65*time.Millisecond),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSpinnerType(14),
+		progressbar.OptionFullWidth(),
+		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionEnableColorCodes(true),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "[green]━[reset]",
+			SaucerHead:    "[green]━[reset]",
+			SaucerPadding: " ",
+			BarStart:      "",
+			BarEnd:        "",
+		}),
+	)
+
 	for _, action := range finalPlan {
 		action := action
 		
@@ -130,7 +161,7 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 			
 			if action.Action == ActionConflict {
 				if opts.Command == "pull" || opts.Command == "sync" {
-					err := executePullConflict(client, currentState, action, opts, &mu)
+					err := executePullConflict(client, currentState, action, opts, &mu, bar)
 					if err != nil {
 						errCh <- fmt.Errorf("error processing %s: %w", action.RelPath, err)
 					}
@@ -142,9 +173,9 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 			var err error
 			switch action.Action {
 			case ActionPush:
-				err = executePush(client, currentState, action, opts, &mu)
+				err = executePush(client, currentState, action, opts, &mu, bar)
 			case ActionPull:
-				err = executePull(client, currentState, action, opts, &mu)
+				err = executePull(client, currentState, action, opts, &mu, bar)
 			case ActionRemoteDelete:
 				if !opts.NoDelete {
 					err = executeRemoteDelete(client, currentState, action, opts, &mu)
@@ -163,6 +194,8 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 
 	wg.Wait()
 	close(errCh)
+	bar.Close()
+	fmt.Println()
 
 	for err := range errCh {
 		if err != nil {
@@ -174,30 +207,9 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 }
 
 
-type progressReader struct {
-	r          io.Reader
-	total      int64
-	read       int64
-	relPath    string
-	lastPrint  time.Time
-	mu         sync.Mutex
-}
 
-func (pr *progressReader) Read(p []byte) (int, error) {
-	n, err := pr.r.Read(p)
-	pr.mu.Lock()
-	pr.read += int64(n)
-	now := time.Now()
-	if pr.total > 0 && now.Sub(pr.lastPrint) > 1*time.Second && pr.read < pr.total {
-		pr.lastPrint = now
-		percent := float64(pr.read) / float64(pr.total) * 100
-		fmt.Printf(" -> [PROGRESS] %s (%.1f%%)\n", pr.relPath, percent)
-	}
-	pr.mu.Unlock()
-	return n, err
-}
 
-func executePush(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions, mu *sync.Mutex) error {
+func executePush(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions, mu *sync.Mutex, bar *progressbar.ProgressBar) error {
 	localPath := filepath.Join(opts.BaseDir, action.RelPath)
 	remotePath := path.Join(opts.RemoteTarget, filepath.ToSlash(action.RelPath))
 
@@ -207,16 +219,8 @@ func executePush(client *gowebdav.Client, currentState *state.State, action File
 	}
 	defer f.Close()
 
-	infoLocal, _ := f.Stat()
-	var reader io.Reader = &progressReader{
-		r:         f,
-		total:     infoLocal.Size(),
-		relPath:   action.RelPath,
-		lastPrint: time.Now(),
-	}
+	reader := io.TeeReader(f, bar)
 	
-	fmt.Printf(" -> [PUSHING] %s\n", action.RelPath)
-
 	// Ensure remote directory exists
 	dir := path.Dir(remotePath)
 	if err := client.MkdirAll(dir, 0755); err != nil {
@@ -232,7 +236,11 @@ func executePush(client *gowebdav.Client, currentState *state.State, action File
 	if duration.Seconds() == 0 {
 		speed = float64(action.LocalInfo.Size) // Avoid division by zero
 	}
+	
+	mu.Lock()
+	bar.Clear()
 	fmt.Printf(" -> [PUSHED] %s (%s/s)\n", action.RelPath, utils.FormatBytes(int64(speed)))
+	mu.Unlock()
 
 	// Update state
 	mu.Lock()
@@ -261,17 +269,17 @@ func executePush(client *gowebdav.Client, currentState *state.State, action File
 	return state.Save(opts.BaseDir, currentState)
 }
 
-func executePull(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions, mu *sync.Mutex) error {
-	return performPull(client, currentState, action, action.RelPath, opts, mu)
+func executePull(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions, mu *sync.Mutex, bar *progressbar.ProgressBar) error {
+	return performPull(client, currentState, action, action.RelPath, opts, mu, bar)
 }
 
-func executePullConflict(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions, mu *sync.Mutex) error {
+func executePullConflict(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions, mu *sync.Mutex, bar *progressbar.ProgressBar) error {
 	conflictName := GenerateConflictFilename(action.RelPath)
 	fmt.Printf(" -> [CONFLICT] Pulling remote to %s\n", conflictName)
-	return performPull(client, currentState, action, conflictName, opts, mu)
+	return performPull(client, currentState, action, conflictName, opts, mu, bar)
 }
 
-func performPull(client *gowebdav.Client, currentState *state.State, action FilePlan, localRelPath string, opts ExecutionOptions, mu *sync.Mutex) error {
+func performPull(client *gowebdav.Client, currentState *state.State, action FilePlan, localRelPath string, opts ExecutionOptions, mu *sync.Mutex, bar *progressbar.ProgressBar) error {
 	remoteRelPath := action.RelPath
 	remoteETag := action.RemoteInfo.ETag
 	localPath := filepath.Join(opts.BaseDir, localRelPath)
@@ -294,17 +302,9 @@ func performPull(client *gowebdav.Client, currentState *state.State, action File
 		return err
 	}
 	
-	fmt.Printf(" -> [PULLING] %s\n", localRelPath)
 	start := time.Now()
 	
-	progReader := &progressReader{
-		r:         reader,
-		total:     action.RemoteInfo.Size,
-		relPath:   localRelPath,
-		lastPrint: time.Now(),
-	}
-	
-	if _, err := io.Copy(f, progReader); err != nil {
+	if _, err := io.Copy(io.MultiWriter(f, bar), reader); err != nil {
 		f.Close()
 		reader.Close()
 		os.Remove(partPath)
@@ -317,7 +317,11 @@ func performPull(client *gowebdav.Client, currentState *state.State, action File
 	}
 	reader.Close()
 	f.Close()
+	
+	mu.Lock()
+	bar.Clear()
 	fmt.Printf(" -> [PULLED] %s (%s/s)\n", localRelPath, utils.FormatBytes(int64(speed)))
+	mu.Unlock()
 
 	if err := os.Rename(partPath, localPath); err != nil {
 		return err
