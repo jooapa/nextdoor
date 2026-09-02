@@ -7,10 +7,12 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	
 
-	"github.com/jooapa/nextdoor/internal/nextcloud"
+	"github.com/jooapa/nextdoor/internal/utils"
+	"github.com/schollz/progressbar/v3"
+
 	"github.com/jooapa/nextdoor/internal/local"
+	"github.com/jooapa/nextdoor/internal/nextcloud"
 	"github.com/jooapa/nextdoor/internal/state"
 	"github.com/studio-b12/gowebdav"
 )
@@ -26,27 +28,7 @@ type ExecutionOptions struct {
 }
 
 func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []FilePlan, opts ExecutionOptions) error {
-	if opts.Command == "status" {
-		fmt.Println("--- STATUS ---")
-		for _, action := range plan {
-			if opts.Target != "" && action.RelPath != opts.Target && !strings.HasPrefix(action.RelPath, opts.Target+"/") {
-				continue
-			}
-			fmt.Printf("[%s] %s\n", action.Action, action.RelPath)
-		}
-		return nil
-	}
-
-	if opts.DryRun {
-		fmt.Println("DRY RUN: No files will be changed. Plan:")
-		for _, action := range plan {
-			if opts.Target != "" && action.RelPath != opts.Target && !strings.HasPrefix(action.RelPath, opts.Target+"/") {
-				continue
-			}
-			fmt.Printf("[%s] %s\n", action.Action, action.RelPath)
-		}
-		return nil
-	}
+	var finalPlan []FilePlan
 
 	for _, action := range plan {
 		// Filter by target
@@ -72,14 +54,8 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 			if action.Action == ActionConflict {
 				if opts.Strategy == "force-remote" {
 					action.Action = ActionPull
-				} else {
-					// Default pull conflict resolution is to pull into a conflicted copy
-					err := executePullConflict(client, currentState, action, opts)
-					if err != nil {
-						return err
-					}
-					continue
 				}
+				// Default pull conflict resolution is to pull into a conflicted copy
 			}
 		} else if opts.Command == "sync" {
 			if action.Action == ActionConflict {
@@ -88,15 +64,63 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 					action.Action = ActionPush
 				case "force-remote":
 					action.Action = ActionPull
-				default:
-					// Create conflicted copy
-					err := executePullConflict(client, currentState, action, opts)
-					if err != nil {
-						return err
-					}
-					continue
 				}
 			}
+		}
+		finalPlan = append(finalPlan, action)
+	}
+
+	if opts.Command == "status" || opts.DryRun {
+		if opts.Command == "status" {
+			fmt.Println("--- STATUS ---")
+		} else {
+			fmt.Println("DRY RUN: No files will be changed. Plan:")
+		}
+		for _, action := range finalPlan {
+			fmt.Printf("[%s] %s\n", action.Action, action.RelPath)
+		}
+		return nil
+	}
+
+	// Print summary
+	var pushCount, pullCount, delRemoteCount, delLocalCount, conflictCount int
+	var pushSize, pullSize int64
+	for _, action := range finalPlan {
+		switch action.Action {
+		case ActionPush:
+			pushCount++
+			if action.LocalInfo != nil {
+				pushSize += action.LocalInfo.Size
+			}
+		case ActionPull:
+			pullCount++
+			if action.RemoteInfo != nil {
+				pullSize += action.RemoteInfo.Size
+			}
+		case ActionRemoteDelete:
+			delRemoteCount++
+		case ActionLocalDelete:
+			delLocalCount++
+		case ActionConflict:
+			conflictCount++
+			if action.RemoteInfo != nil {
+				pullSize += action.RemoteInfo.Size // Will be pulled as conflict
+			}
+		}
+	}
+
+	fmt.Printf("\nSummary: %d files to push (%s), %d files to pull (%s), %d remote deletes, %d local deletes, %d conflicts\n\n",
+		pushCount, utils.FormatBytes(pushSize), pullCount, utils.FormatBytes(pullSize), delRemoteCount, delLocalCount, conflictCount)
+
+	for _, action := range finalPlan {
+		if action.Action == ActionConflict {
+			if opts.Command == "pull" || opts.Command == "sync" {
+				err := executePullConflict(client, currentState, action, opts)
+				if err != nil {
+					return fmt.Errorf("error processing %s: %w", action.RelPath, err)
+				}
+			}
+			continue
 		}
 
 		// Execute the finalized action
@@ -125,7 +149,6 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 }
 
 func executePush(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions) error {
-	fmt.Printf(" -> [PUSHING] %s\n", action.RelPath)
 	localPath := filepath.Join(opts.BaseDir, action.RelPath)
 	remotePath := path.Join(opts.RemoteTarget, filepath.ToSlash(action.RelPath))
 
@@ -135,14 +158,29 @@ func executePush(client *gowebdav.Client, currentState *state.State, action File
 	}
 	defer f.Close()
 
+	infoLocal, err := f.Stat()
+	var reader io.Reader = f
+	var bar *progressbar.ProgressBar
+	if err == nil {
+		bar = progressbar.DefaultBytes(
+			infoLocal.Size(),
+			"Pushing "+action.RelPath,
+		)
+		reader = io.TeeReader(f, bar)
+	}
+
 	// Ensure remote directory exists
 	dir := path.Dir(remotePath)
 	if err := client.MkdirAll(dir, 0755); err != nil {
 		// Ignore errors on MkdirAll as it might exist
 	}
 
-	if err := nextcloud.AtomicUpload(client, remotePath, f); err != nil {
+	if err := nextcloud.AtomicUpload(client, remotePath, reader); err != nil {
 		return err
+	}
+	if bar != nil {
+		bar.Close()
+		fmt.Println()
 	}
 
 	// Update state
@@ -170,17 +208,18 @@ func executePush(client *gowebdav.Client, currentState *state.State, action File
 }
 
 func executePull(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions) error {
-	fmt.Printf(" -> [PULLING] %s\n", action.RelPath)
-	return performPull(client, currentState, action.RelPath, action.RelPath, action.RemoteInfo.ETag, opts)
+	return performPull(client, currentState, action, action.RelPath, opts)
 }
 
 func executePullConflict(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions) error {
 	conflictName := GenerateConflictFilename(action.RelPath)
 	fmt.Printf(" -> [CONFLICT] Pulling remote to %s\n", conflictName)
-	return performPull(client, currentState, action.RelPath, conflictName, action.RemoteInfo.ETag, opts)
+	return performPull(client, currentState, action, conflictName, opts)
 }
 
-func performPull(client *gowebdav.Client, currentState *state.State, remoteRelPath, localRelPath, remoteETag string, opts ExecutionOptions) error {
+func performPull(client *gowebdav.Client, currentState *state.State, action FilePlan, localRelPath string, opts ExecutionOptions) error {
+	remoteRelPath := action.RelPath
+	remoteETag := action.RemoteInfo.ETag
 	localPath := filepath.Join(opts.BaseDir, localRelPath)
 	remotePath := path.Join(opts.RemoteTarget, filepath.ToSlash(remoteRelPath))
 
@@ -201,7 +240,12 @@ func performPull(client *gowebdav.Client, currentState *state.State, remoteRelPa
 		return err
 	}
 	
-	if _, err := io.Copy(f, reader); err != nil {
+	bar := progressbar.DefaultBytes(
+		action.RemoteInfo.Size,
+		"Pulling "+localRelPath,
+	)
+
+	if _, err := io.Copy(io.MultiWriter(f, bar), reader); err != nil {
 		f.Close()
 		reader.Close()
 		os.Remove(partPath)
@@ -209,6 +253,8 @@ func performPull(client *gowebdav.Client, currentState *state.State, remoteRelPa
 	}
 	reader.Close()
 	f.Close()
+	bar.Close()
+	fmt.Println()
 
 	if err := os.Rename(partPath, localPath); err != nil {
 		return err
