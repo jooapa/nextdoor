@@ -2,53 +2,55 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 
-	"github.com/pelletier/go-toml/v2"
-	"github.com/studio-b12/gowebdav"
+	"github.com/alexflint/go-arg"
+	"github.com/jooapa/nextdoor/internal/config"
+	"github.com/jooapa/nextdoor/internal/nextcloud"
 )
 
-type Config struct {
-	Webdav struct {
-		URL      string `toml:"url"`
-		User     string `toml:"user"`
-		Password string `toml:"password"`
-	} `toml:"webdav"`
+// ListRootCmd represents the 'list_root' subcommand
+type ListRootCmd struct {
+	// Add any specific flags for list_root here in the future
+}
+
+// Args defines the command-line interface structure for go-arg
+var args struct {
+	Config   string       `arg:"--config" default:"config.toml" help:"Path to the configuration file"`
+	ListRoot *ListRootCmd `arg:"subcommand:lr" help:"Connects to Nextcloud and lists all files in the root directory"`
 }
 
 func main() {
-	// 1. Read config.toml
-	configFile, err := os.ReadFile("config.toml")
-	if err != nil {
-		log.Fatalf("Error reading config.toml: %v\nMake sure to create it or run from the correct directory.", err)
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	// Parse the arguments using go-arg
+	p := arg.MustParse(&args)
+
+	// Ensure a subcommand was actually provided
+	if p.Subcommand() == nil {
+		p.WriteHelp(os.Stdout)
+		return fmt.Errorf("a command is required")
 	}
 
-	var cfg Config
-	err = toml.Unmarshal(configFile, &cfg)
+	// Load configuration using the provided flag path
+	cfg, err := config.Load(args.Config)
 	if err != nil {
-		log.Fatalf("Error parsing config.toml: %v", err)
+		return err
 	}
 
-	// 2. Initialize the WebDAV client using config
-	client := gowebdav.NewClient(cfg.Webdav.URL, cfg.Webdav.User, cfg.Webdav.Password)
+	// Initialize the WebDAV client
+	client := nextcloud.NewClient(cfg)
 
-	// Optional: If you are testing on a local server without a valid SSL certificate
-	// client.SetTransport(gowebdav.InsecureTransport())
-
-	// 3. Connect and List Files in the root directory
-	fmt.Println("Connecting to Nextcloud and fetching files...")
-	files, err := client.ReadDir("/")
-	if err != nil {
-		log.Fatalf("Failed to read directory: %v", err)
-	}
-
-	fmt.Println("Files in Root Directory:")
-	for _, file := range files {
-		if file.IsDir() {
-			fmt.Printf("[DIR]  %s\n", file.Name())
-		} else {
-			fmt.Printf("[FILE] %s (Size: %d bytes)\n", file.Name(), file.Size())
-		}
+	// Route the command based on which struct was populated
+	switch {
+	case args.ListRoot != nil:
+		return nextcloud.ListRootFiles(client)
+	default:
+		return fmt.Errorf("internal error: unhandled subcommand")
 	}
 }
