@@ -23,7 +23,6 @@ type InitCmd struct {
 }
 
 type LoginCmd struct{}
-
 type StatusCmd struct{}
 
 type PullCmd struct {
@@ -55,20 +54,18 @@ type ListRootCmd struct{}
 // --- Main Arguments Structure ---
 
 var args struct {
-	// Global Flags
-	Config         string `arg:"--config" help:"Path to the configuration file (defaults to config.toml in the binary's directory)"`
-	Verbose        bool   `arg:"--verbose,-v" help:"Enable verbose output for debugging and real-time progress"`
-	IncludeHidden  bool   `arg:"--include-hidden" help:"Include hidden OS files (e.g., .DS_Store, .swp) which are ignored by default"`
-	FollowSymlinks bool   `arg:"--follow-symlinks" help:"Follow symlinks instead of ignoring them (use with caution)"`
+	Config         string `arg:"--config" help:"Path to the configuration file"`
+	Verbose        bool   `arg:"--verbose,-v" help:"Enable verbose output"`
+	IncludeHidden  bool   `arg:"--include-hidden" help:"Include hidden OS files"`
+	FollowSymlinks bool   `arg:"--follow-symlinks" help:"Follow symlinks"`
 
-	// Commands
-	Init     *InitCmd     `arg:"subcommand:init" help:"Initializes a new sync folder at the specified path"`
-	Login    *LoginCmd    `arg:"subcommand:login" help:"Authenticate and configure WebDAV settings"`
-	Status   *StatusCmd   `arg:"subcommand:status" help:"Compare local state against remote state"`
-	Pull     *PullCmd     `arg:"subcommand:pull" help:"Pull newer files from Nextcloud to local"`
-	Push     *PushCmd     `arg:"subcommand:push" help:"Push newer files from local to Nextcloud"`
-	Sync     *SyncCmd     `arg:"subcommand:sync" help:"Perform a two-way sync (push and pull)"`
-	ListRoot *ListRootCmd `arg:"subcommand:list_root" help:"Connects to Nextcloud and lists all files in the root directory"`
+	Init     *InitCmd     `arg:"subcommand:init"`
+	Login    *LoginCmd    `arg:"subcommand:login"`
+	Status   *StatusCmd   `arg:"subcommand:status"`
+	Pull     *PullCmd     `arg:"subcommand:pull"`
+	Push     *PushCmd     `arg:"subcommand:push"`
+	Sync     *SyncCmd     `arg:"subcommand:sync"`
+	ListRoot *ListRootCmd `arg:"subcommand:list_root"`
 }
 
 func main() {
@@ -80,39 +77,22 @@ func main() {
 
 func run() error {
 	p := arg.MustParse(&args)
-
 	if p.Subcommand() == nil {
 		p.WriteHelp(os.Stdout)
 		return fmt.Errorf("a command is required")
 	}
 
-	if args.Verbose {
-		fmt.Println("[DEBUG] Verbose logging enabled.")
-	}
-
-	// 1. Handle commands that DO NOT require Nextcloud connection/config yet
 	switch {
 	case args.Init != nil:
-		if args.Init.Remote != "" {
-			fmt.Printf("Initializing from remote path: %s\n", args.Init.Remote)
-		}
-		if args.Init.Rebuild {
-			fmt.Println("Rebuild flag detected: will recalculate all hashes.")
-		}
 		return local.Init(args.Init.Path)
-
 	case args.Login != nil:
 		fmt.Println("Login prompt would appear here.")
 		return nil
 	}
 
-	// 2. Load configuration for commands that require a connection
 	configPath := args.Config
 	if configPath == "" {
-		exePath, err := os.Executable()
-		if err != nil {
-			return fmt.Errorf("failed to get executable path: %w", err)
-		}
+		exePath, _ := os.Executable()
 		configPath = filepath.Join(filepath.Dir(exePath), "config.toml")
 	}
 
@@ -120,110 +100,81 @@ func run() error {
 	if err != nil {
 		return err
 	}
-
 	client := nextcloud.NewClient(cfg)
 
-	// 3. Route the remaining commands
 	switch {
 	case args.Status != nil:
 		fmt.Println("Status check not yet implemented.")
 		return nil
-
-	case args.Pull != nil:
-		if args.Pull.Target != "" {
-			fmt.Printf("Pulling specific target: %s\n", args.Pull.Target)
-		} else {
-			fmt.Println("Pulling all files...")
-		}
-		return nil
-
-	case args.Push != nil:
-		baseDir := "."
-
-		// 1. Load Local State
-		currentState, err := state.Load(baseDir)
-		if err != nil {
-			return fmt.Errorf("failed to load local state: %w", err)
-		}
-
-		// 2. Handle --set-remote validation
-		if args.Push.SetRemote != "" {
-			fmt.Printf("Verifying remote target %s...\n", args.Push.SetRemote)
-
-			// Constraint: Query WebDAV. If folder exists AND contains files, reject.
-			infos, err := client.ReadDir(args.Push.SetRemote)
-			if err == nil && len(infos) > 0 {
-				return fmt.Errorf("remote target '%s' is not empty. To protect your data, use 'nextdoor init --remote %s' instead to clone it locally first", args.Push.SetRemote, args.Push.SetRemote)
-			}
-
-			currentState.RemoteTarget = args.Push.SetRemote
-			if err := state.Save(baseDir, currentState); err != nil {
-				return fmt.Errorf("failed to save new remote target to state: %w", err)
-			}
-			fmt.Println("Remote target configured successfully.")
-		} else if currentState.RemoteTarget == "" {
-			return fmt.Errorf("no remote target configured. Use --set-remote <target> on your first push")
-		}
-
-		fmt.Printf("Pushing to Nextcloud target: %s\n", currentState.RemoteTarget)
-
-		// 3. Run Local Discovery
-		fmt.Println("Scanning local directory...")
-		scanner := local.NewScanner(baseDir, currentState)
-		localFiles, err := scanner.Scan()
-		if err != nil {
-			return fmt.Errorf("local scan failed: %w", err)
-		}
-
-		// 4. Run Remote Discovery
-		fmt.Println("Fetching remote state...")
-		remoteFiles, err := nextcloud.FetchDirectoryTree(client, currentState.RemoteTarget)
-		if err != nil {
-			if !strings.Contains(err.Error(), "404") {
-				return fmt.Errorf("failed to fetch remote tree: %w", err)
-			}
-			fmt.Printf("[Warning] Remote tree not found, assuming empty: %v\n", err)
-			if remoteFiles == nil {
-				remoteFiles = make(map[string]nextcloud.RemoteFile)
-			}
-		}
-
-		// 5. Run Reconciliation Engine
-		fmt.Println("Reconciling state...")
-		plan := sync.Reconcile(currentState, localFiles, remoteFiles)
-
-		// 6. Preview Plan
-		pushCount := 0
-		for _, action := range plan {
-			if action.Action == sync.ActionPush {
-				fmt.Printf(" -> [PUSH] %s\n", action.RelPath)
-				pushCount++
-			} else if action.Action == sync.ActionConflict {
-				fmt.Printf(" -> [CONFLICT] %s\n", action.RelPath)
-			}
-		}
-
-		if pushCount == 0 {
-			fmt.Println("Everything is up-to-date. Nothing to push.")
-		}
-
-		return nil
-
-	case args.Sync != nil:
-		if args.Sync.DryRun {
-			fmt.Println("Running sync in DRY-RUN mode. No files will be changed.")
-		}
-		if args.Sync.Target != "" {
-			fmt.Printf("Syncing specific target: %s\n", args.Sync.Target)
-		} else {
-			fmt.Println("Syncing all files...")
-		}
-		return nil
-
 	case args.ListRoot != nil:
 		return nextcloud.ListRootFiles(client)
-
-	default:
-		return fmt.Errorf("internal error: unhandled subcommand")
 	}
+
+	// For Push, Pull, Sync
+	baseDir := "."
+	currentState, err := state.Load(baseDir)
+	if err != nil {
+		return fmt.Errorf("failed to load local state: %w", err)
+	}
+
+	var execOpts sync.ExecutionOptions
+	execOpts.BaseDir = baseDir
+
+	if args.Push != nil {
+		execOpts.Command = "push"
+		execOpts.NoDelete = args.Push.NoDelete
+		if args.Push.SetRemote != "" {
+			infos, err := client.ReadDir(args.Push.SetRemote)
+			if err == nil && len(infos) > 0 {
+				return fmt.Errorf("remote target '%s' is not empty", args.Push.SetRemote)
+			}
+			currentState.RemoteTarget = args.Push.SetRemote
+			if err := state.Save(baseDir, currentState); err != nil {
+				return err
+			}
+		}
+	} else if args.Pull != nil {
+		execOpts.Command = "pull"
+	} else if args.Sync != nil {
+		execOpts.Command = "sync"
+		execOpts.DryRun = args.Sync.DryRun
+		execOpts.Strategy = args.Sync.Strategy
+		execOpts.NoDelete = args.Sync.NoDelete
+	}
+
+	if currentState.RemoteTarget == "" {
+		return fmt.Errorf("no remote target configured")
+	}
+	execOpts.RemoteTarget = currentState.RemoteTarget
+
+	fmt.Println("Scanning local directory...")
+	scanner := local.NewScanner(baseDir, currentState)
+	localFiles, err := scanner.Scan()
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Fetching remote state...")
+	remoteFiles, err := nextcloud.FetchDirectoryTree(client, currentState.RemoteTarget)
+	if err != nil {
+		if !strings.Contains(err.Error(), "404") {
+			return err
+		}
+		fmt.Printf("[Warning] Remote tree not found, assuming empty: %v\n", err)
+		if remoteFiles == nil {
+			remoteFiles = make(map[string]nextcloud.RemoteFile)
+		}
+	}
+
+	fmt.Println("Reconciling state...")
+	plan := sync.Reconcile(currentState, localFiles, remoteFiles)
+
+	fmt.Println("Executing plan...")
+	err = sync.ExecutePlan(client, currentState, plan, execOpts)
+	if err != nil {
+		return err
+	}
+	
+	fmt.Println("Sync completed successfully.")
+	return nil
 }

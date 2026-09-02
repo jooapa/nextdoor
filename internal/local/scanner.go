@@ -57,7 +57,7 @@ func (s *Scanner) Scan() (map[string]state.FileInfo, error) {
 		// Ensure consistent path separators (forward slash) for cross-platform compatibility
 		relPath = filepath.ToSlash(relPath)
 
-		hash, err := s.hashFileFastPath(path, relPath, info)
+		hash, err := s.HashFileFastPath(path, relPath, info)
 		if err != nil {
 			return fmt.Errorf("failed to process file %s: %w", relPath, err)
 		}
@@ -79,8 +79,8 @@ func (s *Scanner) Scan() (map[string]state.FileInfo, error) {
 	return currentFiles, nil
 }
 
-// hashFileFastPath implements the "I/O Saver" rule.
-func (s *Scanner) hashFileFastPath(absPath, relPath string, info fs.FileInfo) (string, error) {
+// HashFileFastPath implements the "I/O Saver" rule.
+func (s *Scanner) HashFileFastPath(absPath, relPath string, info fs.FileInfo) (string, error) {
 	// The Fast Path: Check if we have a cache hit based on OS metadata
 	if s.State != nil && s.State.Files != nil {
 		if cached, exists := s.State.Files[relPath]; exists {
