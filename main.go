@@ -59,6 +59,7 @@ var args struct {
 	Verbose        bool   `arg:"--verbose,-v" help:"Enable verbose output"`
 	IncludeHidden  bool   `arg:"--include-hidden" help:"Include hidden OS files"`
 	FollowSymlinks bool   `arg:"--follow-symlinks" help:"Follow symlinks"`
+	Concurrency    int    `arg:"--concurrency,-c" default:"0" help:"Number of concurrent transfers (0 = auto)"`
 
 	Init     *InitCmd     `arg:"subcommand:init"`
 	Login    *LoginCmd    `arg:"subcommand:login"`

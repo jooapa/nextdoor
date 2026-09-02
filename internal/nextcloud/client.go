@@ -15,9 +15,9 @@ func NewClient(cfg *config.Config) *gowebdav.Client {
 	
 	// Optimize HTTP transport for high concurrency and speed
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConns = 100
-	transport.MaxIdleConnsPerHost = 100
-	transport.MaxConnsPerHost = 100
+	transport.MaxIdleConns = 500
+	transport.MaxIdleConnsPerHost = 500
+	transport.MaxConnsPerHost = 500
 	transport.IdleConnTimeout = 90 * time.Second
 	client.SetTransport(transport)
 	client.SetTimeout(30 * time.Second)

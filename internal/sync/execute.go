@@ -27,6 +27,7 @@ type ExecutionOptions struct {
 	Strategy     string // "force-local" or "force-remote"
 	Command      string // "push", "pull", or "sync"
 	Target       string // specific file or directory to process
+	Concurrency  int
 }
 
 func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []FilePlan, opts ExecutionOptions) error {
@@ -117,16 +118,43 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(finalPlan))
-	sem := make(chan struct{}, 15) // Concurrency limit
 
 	var totalTransferSize int64
+	var numTransfers int
 	for _, action := range finalPlan {
 		if action.Action == ActionPush && action.LocalInfo != nil {
 			totalTransferSize += action.LocalInfo.Size
+			numTransfers++
 		} else if (action.Action == ActionPull || action.Action == ActionConflict) && action.RemoteInfo != nil {
 			totalTransferSize += action.RemoteInfo.Size
+			numTransfers++
 		}
 	}
+
+	concurrency := opts.Concurrency
+	if concurrency <= 0 {
+		if numTransfers == 0 {
+			concurrency = 1
+		} else {
+			avgSize := totalTransferSize / int64(numTransfers)
+			switch {
+			case avgSize < 256*1024: // < 256 KB
+				concurrency = 50
+			case avgSize < 1024*1024: // < 1 MB
+				concurrency = 25
+			case avgSize < 10*1024*1024: // < 10 MB
+				concurrency = 10
+			case avgSize < 100*1024*1024: // < 100 MB
+				concurrency = 5
+			default: // > 100 MB
+				concurrency = 2
+			}
+		}
+		// Log the auto-selected concurrency
+		fmt.Printf("Auto-selected concurrency: %d workers\n", concurrency)
+	}
+
+	sem := make(chan struct{}, concurrency) // Concurrency limit
 
 	bar := progressbar.NewOptions64(
 		totalTransferSize,
