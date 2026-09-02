@@ -1,0 +1,110 @@
+package local
+
+import (
+	"encoding/hex"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+
+	"github.com/jooapa/nextdoor/internal/state"
+	"github.com/zeebo/xxh3"
+)
+
+// Scanner handles local filesystem operations.
+type Scanner struct {
+	BaseDir string
+	State   *state.State
+}
+
+// NewScanner creates a new scanner initialized with the base directory and current state.
+func NewScanner(baseDir string, currentState *state.State) *Scanner {
+	return &Scanner{
+		BaseDir: baseDir,
+		State:   currentState,
+	}
+}
+
+// Scan traverses the local directory and returns a map of all files and their computed state.
+func (s *Scanner) Scan() (map[string]state.FileInfo, error) {
+	currentFiles := make(map[string]state.FileInfo)
+
+	err := filepath.WalkDir(s.BaseDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip the internal .nextdoor directory
+		if d.IsDir() && d.Name() == state.StateDir {
+			return filepath.SkipDir
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return fmt.Errorf("failed to get file info for %s: %w", path, err)
+		}
+
+		relPath, err := filepath.Rel(s.BaseDir, path)
+		if err != nil {
+			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
+		}
+
+		// Ensure consistent path separators (forward slash) for cross-platform compatibility
+		relPath = filepath.ToSlash(relPath)
+
+		hash, err := s.hashFileFastPath(path, relPath, info)
+		if err != nil {
+			return fmt.Errorf("failed to process file %s: %w", relPath, err)
+		}
+
+		// ETag will be populated/preserved during the reconciliation phase.
+		currentFiles[relPath] = state.FileInfo{
+			LocalXXHash3: hash,
+			Size:         info.Size(),
+			ModTime:      info.ModTime(),
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan local directory: %w", err)
+	}
+
+	return currentFiles, nil
+}
+
+// hashFileFastPath implements the "I/O Saver" rule.
+func (s *Scanner) hashFileFastPath(absPath, relPath string, info fs.FileInfo) (string, error) {
+	// The Fast Path: Check if we have a cache hit based on OS metadata
+	if s.State != nil && s.State.Files != nil {
+		if cached, exists := s.State.Files[relPath]; exists {
+			// Compare modtime and size. If they exactly match, file is unchanged.
+			if cached.Size == info.Size() && cached.ModTime.Equal(info.ModTime()) {
+				if cached.LocalXXHash3 != "" {
+					return cached.LocalXXHash3, nil
+				}
+			}
+		}
+	}
+
+	// The Slow Path: File was modified or is new. Compute the true xxhash3 hash.
+	f, err := os.Open(absPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open file for hashing: %w", err)
+	}
+	defer f.Close()
+
+	hasher := xxh3.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return "", fmt.Errorf("failed to compute hash for %s: %w", absPath, err)
+	}
+
+	hashBytes := hasher.Sum(nil)
+	return hex.EncodeToString(hashBytes), nil
+}

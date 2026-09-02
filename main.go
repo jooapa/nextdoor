@@ -8,6 +8,8 @@ import (
 	"github.com/jooapa/nextdoor/internal/config"
 	"github.com/jooapa/nextdoor/internal/local"
 	"github.com/jooapa/nextdoor/internal/nextcloud"
+	"github.com/jooapa/nextdoor/internal/state"
+	"github.com/jooapa/nextdoor/internal/sync"
 )
 
 // --- Subcommand Structures ---
@@ -125,11 +127,72 @@ func run() error {
 		return nil
 
 	case args.Push != nil:
-		if args.Push.Target != "" {
-			fmt.Printf("Pushing specific target: %s\n", args.Push.Target)
-		} else {
-			fmt.Println("Pushing all files...")
+		baseDir := "."
+		
+		// 1. Load Local State
+		currentState, err := state.Load(baseDir)
+		if err != nil {
+			return fmt.Errorf("failed to load local state: %w", err)
 		}
+
+		// 2. Handle --set-remote validation
+		if args.Push.SetRemote != "" {
+			fmt.Printf("Verifying remote target %s...\n", args.Push.SetRemote)
+			
+			// Constraint: Query WebDAV. If folder exists AND contains files, reject.
+			infos, err := client.ReadDir(args.Push.SetRemote)
+			if err == nil && len(infos) > 0 {
+				return fmt.Errorf("remote target '%s' is not empty. To protect your data, use 'nextdoor init --remote %s' instead to clone it locally first", args.Push.SetRemote, args.Push.SetRemote)
+			}
+
+			currentState.RemoteTarget = args.Push.SetRemote
+			if err := state.Save(baseDir, currentState); err != nil {
+				return fmt.Errorf("failed to save new remote target to state: %w", err)
+			}
+			fmt.Println("Remote target configured successfully.")
+		} else if currentState.RemoteTarget == "" {
+			return fmt.Errorf("no remote target configured. Use --set-remote <target> on your first push")
+		}
+
+		fmt.Printf("Pushing to Nextcloud target: %s\n", currentState.RemoteTarget)
+		
+		// 3. Run Local Discovery
+		fmt.Println("Scanning local directory...")
+		scanner := local.NewScanner(baseDir, currentState)
+		localFiles, err := scanner.Scan()
+		if err != nil {
+			return fmt.Errorf("local scan failed: %w", err)
+		}
+
+		// 4. Run Remote Discovery
+		fmt.Println("Fetching remote state...")
+		remoteFiles, err := nextcloud.FetchDirectoryTree(client, currentState.RemoteTarget)
+		if err != nil {
+			fmt.Printf("[Warning] Failed to fetch remote tree (it might not exist yet): %v\n", err)
+			if remoteFiles == nil {
+				remoteFiles = make(map[string]nextcloud.RemoteFile)
+			}
+		}
+
+		// 5. Run Reconciliation Engine
+		fmt.Println("Reconciling state...")
+		plan := sync.Reconcile(currentState, localFiles, remoteFiles)
+
+		// 6. Preview Plan
+		pushCount := 0
+		for _, action := range plan {
+			if action.Action == sync.ActionPush {
+				fmt.Printf(" -> [PUSH] %s\n", action.RelPath)
+				pushCount++
+			} else if action.Action == sync.ActionConflict {
+				fmt.Printf(" -> [CONFLICT] %s\n", action.RelPath)
+			}
+		}
+		
+		if pushCount == 0 {
+			fmt.Println("Everything is up-to-date. Nothing to push.")
+		}
+
 		return nil
 
 	case args.Sync != nil:
