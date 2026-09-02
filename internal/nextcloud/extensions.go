@@ -59,18 +59,19 @@ func fetchTree(client *gowebdav.Client, currentPath, relPath string, files map[s
 			continue // Avoid mapping the root to an empty key
 		}
 
-		files[relFilePath] = RemoteFile{
-			Path:  filePath,
-			ETag:  etag,
-			Size:  info.Size(),
-			IsDir: info.IsDir(),
-		}
-
-		// Recursively fetch subdirectories
+		// Recursively fetch subdirectories and skip adding them to the files map
 		if info.IsDir() {
 			if err := fetchTree(client, filePath, relFilePath, files); err != nil {
 				return err
 			}
+			continue
+		}
+
+		files[relFilePath] = RemoteFile{
+			Path:  filePath,
+			ETag:  etag,
+			Size:  info.Size(),
+			IsDir: info.IsDir(), // Now always false
 		}
 	}
 

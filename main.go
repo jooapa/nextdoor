@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/alexflint/go-arg"
 	"github.com/jooapa/nextdoor/internal/config"
@@ -31,12 +32,12 @@ type PullCmd struct {
 }
 
 type PushCmd struct {
-	Target   string   `arg:"positional" help:"Specific file or directory to push (leave blank for everything)"`
-	SetRemote string  `arg:"--set-remote" help:"Set the remote target folder for the very first push"`
-	Ignore   []string `arg:"--ignore" help:"Ignore files matching these glob patterns (e.g., '*.tmp')"`
-	BwLimit  int      `arg:"--bwlimit" help:"Bandwidth limit in KB/s"`
-	MaxSize  string   `arg:"--max-size" help:"Skip files larger than this size (e.g., '1G', '500M')"`
-	NoDelete bool     `arg:"--no-delete" help:"Prevent deleting files on the remote server (append-only)"`
+	Target    string   `arg:"positional" help:"Specific file or directory to push (leave blank for everything)"`
+	SetRemote string   `arg:"--set-remote" help:"Set the remote target folder for the very first push"`
+	Ignore    []string `arg:"--ignore" help:"Ignore files matching these glob patterns (e.g., '*.tmp')"`
+	BwLimit   int      `arg:"--bwlimit" help:"Bandwidth limit in KB/s"`
+	MaxSize   string   `arg:"--max-size" help:"Skip files larger than this size (e.g., '1G', '500M')"`
+	NoDelete  bool     `arg:"--no-delete" help:"Prevent deleting files on the remote server (append-only)"`
 }
 
 type SyncCmd struct {
@@ -128,7 +129,7 @@ func run() error {
 
 	case args.Push != nil:
 		baseDir := "."
-		
+
 		// 1. Load Local State
 		currentState, err := state.Load(baseDir)
 		if err != nil {
@@ -138,7 +139,7 @@ func run() error {
 		// 2. Handle --set-remote validation
 		if args.Push.SetRemote != "" {
 			fmt.Printf("Verifying remote target %s...\n", args.Push.SetRemote)
-			
+
 			// Constraint: Query WebDAV. If folder exists AND contains files, reject.
 			infos, err := client.ReadDir(args.Push.SetRemote)
 			if err == nil && len(infos) > 0 {
@@ -155,7 +156,7 @@ func run() error {
 		}
 
 		fmt.Printf("Pushing to Nextcloud target: %s\n", currentState.RemoteTarget)
-		
+
 		// 3. Run Local Discovery
 		fmt.Println("Scanning local directory...")
 		scanner := local.NewScanner(baseDir, currentState)
@@ -168,7 +169,10 @@ func run() error {
 		fmt.Println("Fetching remote state...")
 		remoteFiles, err := nextcloud.FetchDirectoryTree(client, currentState.RemoteTarget)
 		if err != nil {
-			fmt.Printf("[Warning] Failed to fetch remote tree (it might not exist yet): %v\n", err)
+			if !strings.Contains(err.Error(), "404") {
+				return fmt.Errorf("failed to fetch remote tree: %w", err)
+			}
+			fmt.Printf("[Warning] Remote tree not found, assuming empty: %v\n", err)
 			if remoteFiles == nil {
 				remoteFiles = make(map[string]nextcloud.RemoteFile)
 			}
@@ -188,7 +192,7 @@ func run() error {
 				fmt.Printf(" -> [CONFLICT] %s\n", action.RelPath)
 			}
 		}
-		
+
 		if pushCount == 0 {
 			fmt.Println("Everything is up-to-date. Nothing to push.")
 		}

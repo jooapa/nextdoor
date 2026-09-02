@@ -63,13 +63,13 @@ func Save(baseDir string, s *State) error {
 	}
 
 	statePath := filepath.Join(stateDirPath, StateFileName)
-	tmpPath := statePath + ".tmp"
 
-	// Open the temp file for writing
-	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	// Open a unique temp file for writing
+	f, err := os.CreateTemp(stateDirPath, StateFileName+".*.tmp")
 	if err != nil {
 		return fmt.Errorf("failed to create temp state file: %w", err)
 	}
+	tmpPath := f.Name()
 
 	// Write JSON data
 	enc := json.NewEncoder(f)
