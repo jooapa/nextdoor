@@ -16,12 +16,12 @@ type FileInfo struct {
 	ModTime      time.Time `json:"modtime"`
 }
 
-// State represents the common ancestor tracking file (directory.json).
 type State struct {
-	SchemaVersion int                 `json:"schemaVersion"`
-	RemoteTarget  string              `json:"remoteTarget"`
-	LastSyncTime  time.Time           `json:"lastSyncTime"`
-	Files         map[string]FileInfo `json:"files"`
+	SchemaVersion  int                 `json:"schemaVersion"`
+	RemoteTarget   string              `json:"remoteTarget"`
+	RemoteRootETag string              `json:"remoteRootETag,omitempty"`
+	LastSyncTime   time.Time           `json:"lastSyncTime"`
+	Files          map[string]FileInfo `json:"files"`
 }
 
 const (

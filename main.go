@@ -12,6 +12,7 @@ import (
 	"github.com/jooapa/nextdoor/internal/nextcloud"
 	"github.com/jooapa/nextdoor/internal/state"
 	"github.com/jooapa/nextdoor/internal/sync"
+	"github.com/jooapa/nextdoor/internal/utils"
 )
 
 // --- Subcommand Structures ---
@@ -84,7 +85,7 @@ func run() error {
 
 	switch {
 	case args.Init != nil:
-		return local.Init(args.Init.Path)
+		return local.Init(args.Init.Path, args.Init.Remote, args.Init.Rebuild)
 	case args.Login != nil:
 		fmt.Println("Login prompt would appear here.")
 		return nil
@@ -102,15 +103,7 @@ func run() error {
 	}
 	client := nextcloud.NewClient(cfg)
 
-	switch {
-	case args.Status != nil:
-		fmt.Println("Status check not yet implemented.")
-		return nil
-	case args.ListRoot != nil:
-		return nextcloud.ListRootFiles(client)
-	}
-
-	// For Push, Pull, Sync
+	// For Push, Pull, Sync, Status
 	baseDir := "."
 	currentState, err := state.Load(baseDir)
 	if err != nil {
@@ -119,10 +112,24 @@ func run() error {
 
 	var execOpts sync.ExecutionOptions
 	execOpts.BaseDir = baseDir
+	
+	var scanOpts local.ScannerOptions
+	scanOpts.IncludeHidden = args.IncludeHidden
 
-	if args.Push != nil {
+	if args.Status != nil {
+		execOpts.Command = "status"
+		execOpts.DryRun = true
+	} else if args.Push != nil {
 		execOpts.Command = "push"
 		execOpts.NoDelete = args.Push.NoDelete
+		execOpts.Target = args.Push.Target
+		scanOpts.Target = args.Push.Target
+		scanOpts.Ignores = args.Push.Ignore
+		var err error
+		scanOpts.MaxSize, err = utils.ParseSize(args.Push.MaxSize)
+		if err != nil {
+			return err
+		}
 		if args.Push.SetRemote != "" {
 			infos, err := client.ReadDir(args.Push.SetRemote)
 			if err == nil && len(infos) > 0 {
@@ -135,11 +142,27 @@ func run() error {
 		}
 	} else if args.Pull != nil {
 		execOpts.Command = "pull"
+		execOpts.Target = args.Pull.Target
+		scanOpts.Target = args.Pull.Target
+		var err error
+		scanOpts.MaxSize, err = utils.ParseSize(args.Pull.MaxSize)
+		if err != nil {
+			return err
+		}
 	} else if args.Sync != nil {
 		execOpts.Command = "sync"
 		execOpts.DryRun = args.Sync.DryRun
 		execOpts.Strategy = args.Sync.Strategy
 		execOpts.NoDelete = args.Sync.NoDelete
+		execOpts.Target = args.Sync.Target
+		scanOpts.Target = args.Sync.Target
+		var err error
+		scanOpts.MaxSize, err = utils.ParseSize(args.Sync.MaxSize)
+		if err != nil {
+			return err
+		}
+	} else if args.ListRoot != nil {
+		return nextcloud.ListRootFiles(client)
 	}
 
 	if currentState.RemoteTarget == "" {
@@ -147,23 +170,59 @@ func run() error {
 	}
 	execOpts.RemoteTarget = currentState.RemoteTarget
 
-	fmt.Println("Scanning local directory...")
-	scanner := local.NewScanner(baseDir, currentState)
+	if args.Verbose {
+		fmt.Println("Scanning local directory...")
+	}
+	scanner := local.NewScanner(baseDir, currentState, scanOpts)
 	localFiles, err := scanner.Scan()
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("Fetching remote state...")
-	remoteFiles, err := nextcloud.FetchDirectoryTree(client, currentState.RemoteTarget)
-	if err != nil {
-		if !strings.Contains(err.Error(), "404") {
-			return err
+	if args.Verbose {
+		fmt.Println("Fetching remote state...")
+	}
+	
+	// ETag Short-Circuit Optimization
+	var currentRootETag string
+	rootInfo, err := client.Stat(currentState.RemoteTarget)
+	if err == nil {
+		if wdFile, ok := rootInfo.(nextcloud.FileInfo); ok {
+			currentRootETag = wdFile.ETag()
 		}
-		fmt.Printf("[Warning] Remote tree not found, assuming empty: %v\n", err)
-		if remoteFiles == nil {
-			remoteFiles = make(map[string]nextcloud.RemoteFile)
+	}
+
+	var remoteFiles map[string]nextcloud.RemoteFile
+	
+	if currentRootETag != "" && currentState.RemoteRootETag == currentRootETag && args.Status == nil && execOpts.Target == "" {
+		if args.Verbose {
+			fmt.Println("Remote root ETag unchanged. Skipping remote discovery phase.")
 		}
+		// Reconstruct remoteFiles from current state
+		remoteFiles = make(map[string]nextcloud.RemoteFile)
+		for p, f := range currentState.Files {
+			if f.RemoteETag != "" {
+				remoteFiles[p] = nextcloud.RemoteFile{
+					Path: p,
+					ETag: f.RemoteETag,
+					Size: f.Size,
+				}
+			}
+		}
+	} else {
+		remoteFiles, err = nextcloud.FetchDirectoryTree(client, currentState.RemoteTarget)
+		if err != nil {
+			if !strings.Contains(err.Error(), "404") {
+				return err
+			}
+			fmt.Printf("[Warning] Remote tree not found, assuming empty: %v\n", err)
+			if remoteFiles == nil {
+				remoteFiles = make(map[string]nextcloud.RemoteFile)
+			}
+		}
+		
+		// Update the root ETag so we can save it later
+		currentState.RemoteRootETag = currentRootETag
 	}
 
 	fmt.Println("Reconciling state...")
