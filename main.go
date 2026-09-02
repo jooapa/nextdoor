@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/alexflint/go-arg"
@@ -55,7 +56,7 @@ type ListRootCmd struct{}
 
 var args struct {
 	// Global Flags
-	Config         string `arg:"--config" default:"config.toml" help:"Path to the configuration file"`
+	Config         string `arg:"--config" help:"Path to the configuration file (defaults to config.toml in the binary's directory)"`
 	Verbose        bool   `arg:"--verbose,-v" help:"Enable verbose output for debugging and real-time progress"`
 	IncludeHidden  bool   `arg:"--include-hidden" help:"Include hidden OS files (e.g., .DS_Store, .swp) which are ignored by default"`
 	FollowSymlinks bool   `arg:"--follow-symlinks" help:"Follow symlinks instead of ignoring them (use with caution)"`
@@ -106,7 +107,16 @@ func run() error {
 	}
 
 	// 2. Load configuration for commands that require a connection
-	cfg, err := config.Load(args.Config)
+	configPath := args.Config
+	if configPath == "" {
+		exePath, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("failed to get executable path: %w", err)
+		}
+		configPath = filepath.Join(filepath.Dir(exePath), "config.toml")
+	}
+
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
 	}
