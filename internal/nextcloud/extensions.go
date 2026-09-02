@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"sync"
 
 	"github.com/studio-b12/gowebdav"
 )
@@ -29,53 +30,68 @@ type RemoteFile struct {
 // under the hood (via ReadDir) and extracts the ETag for each file.
 func FetchDirectoryTree(client *gowebdav.Client, root string) (map[string]RemoteFile, error) {
 	files := make(map[string]RemoteFile)
-	err := fetchTree(client, root, "", files)
-	if err != nil {
-		return nil, err
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var fetchErr error
+	var errOnce sync.Once
+
+	// Limit concurrency to 20 parallel requests to avoid overwhelming the server
+	sem := make(chan struct{}, 20)
+
+	var fetch func(string, string)
+	fetch = func(currentPath, relPath string) {
+		defer wg.Done()
+
+		sem <- struct{}{}
+		defer func() { <-sem }()
+
+		infos, err := client.ReadDir(currentPath)
+		if err != nil {
+			errOnce.Do(func() {
+				fetchErr = fmt.Errorf("failed to read remote directory %s: %w", currentPath, err)
+			})
+			return
+		}
+
+		for _, info := range infos {
+			var etag string
+			
+			if wdFile, ok := info.(FileInfo); ok {
+				etag = wdFile.ETag()
+			}
+
+			filePath := path.Join(currentPath, info.Name())
+			relFilePath := path.Join(relPath, info.Name())
+			
+			if relFilePath == "" || relFilePath == "." {
+				continue
+			}
+
+			if info.IsDir() {
+				wg.Add(1)
+				go fetch(filePath, relFilePath)
+				continue
+			}
+
+			mu.Lock()
+			files[relFilePath] = RemoteFile{
+				Path:  filePath,
+				ETag:  etag,
+				Size:  info.Size(),
+				IsDir: false,
+			}
+			mu.Unlock()
+		}
+	}
+
+	wg.Add(1)
+	go fetch(root, "")
+	wg.Wait()
+
+	if fetchErr != nil {
+		return nil, fetchErr
 	}
 	return files, nil
-}
-
-func fetchTree(client *gowebdav.Client, currentPath, relPath string, files map[string]RemoteFile) error {
-	// ReadDir uses a PROPFIND request with Depth: 1
-	infos, err := client.ReadDir(currentPath)
-	if err != nil {
-		return fmt.Errorf("failed to read remote directory %s: %w", currentPath, err)
-	}
-
-	for _, info := range infos {
-		var etag string
-		
-		// Type assert to our interface to extract the ETag
-		if wdFile, ok := info.(FileInfo); ok {
-			etag = wdFile.ETag()
-		}
-
-		filePath := path.Join(currentPath, info.Name())
-		relFilePath := path.Join(relPath, info.Name())
-		
-		// Clean paths to ensure consistent map keys
-		if relFilePath == "" || relFilePath == "." {
-			continue // Avoid mapping the root to an empty key
-		}
-
-		// Recursively fetch subdirectories and skip adding them to the files map
-		if info.IsDir() {
-			if err := fetchTree(client, filePath, relFilePath, files); err != nil {
-				return err
-			}
-			continue
-		}
-
-		files[relFilePath] = RemoteFile{
-			Path:  filePath,
-			ETag:  etag,
-			Size:  info.Size(),
-			IsDir: info.IsDir(), // Now always false
-		}
-	}
-
-	return nil
 }
 
 // AtomicUpload safely uploads a file using a .nextdoor-tmp extension, then renames it via WebDAV MOVE.

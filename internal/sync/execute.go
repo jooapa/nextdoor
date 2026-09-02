@@ -128,6 +128,8 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 		} else if (action.Action == ActionPull || action.Action == ActionConflict) && action.RemoteInfo != nil {
 			totalTransferSize += action.RemoteInfo.Size
 			numTransfers++
+		} else if action.Action == ActionRemoteDelete || action.Action == ActionLocalDelete {
+			numTransfers++
 		}
 	}
 
@@ -139,9 +141,9 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 			avgSize := totalTransferSize / int64(numTransfers)
 			switch {
 			case avgSize < 256*1024: // < 256 KB
-				concurrency = 50
-			case avgSize < 1024*1024: // < 1 MB
 				concurrency = 25
+			case avgSize < 1024*1024: // < 1 MB
+				concurrency = 15
 			case avgSize < 10*1024*1024: // < 10 MB
 				concurrency = 10
 			case avgSize < 100*1024*1024: // < 100 MB

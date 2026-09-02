@@ -241,6 +241,10 @@ func run() error {
 		return err
 	}
 	
+	if err := state.Save(baseDir, currentState); err != nil {
+		return fmt.Errorf("failed to save state: %w", err)
+	}
+
 	fmt.Println("Sync completed successfully.")
 	return nil
 }
