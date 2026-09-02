@@ -83,11 +83,12 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 			}
 		} else if opts.Command == "sync" {
 			if action.Action == ActionConflict {
-				if opts.Strategy == "force-local" {
+				switch opts.Strategy {
+				case "force-local":
 					action.Action = ActionPush
-				} else if opts.Strategy == "force-remote" {
+				case "force-remote":
 					action.Action = ActionPull
-				} else {
+				default:
 					// Create conflicted copy
 					err := executePullConflict(client, currentState, action, opts)
 					if err != nil {
