@@ -10,6 +10,7 @@ import (
 	"github.com/jooapa/nextdoor/internal/config"
 	"github.com/jooapa/nextdoor/internal/local"
 	"github.com/jooapa/nextdoor/internal/nextcloud"
+	"github.com/jooapa/nextdoor/internal/rsync"
 	"github.com/jooapa/nextdoor/internal/state"
 	"github.com/jooapa/nextdoor/internal/sync"
 	"github.com/jooapa/nextdoor/internal/utils"
@@ -60,6 +61,7 @@ var args struct {
 	IncludeHidden  bool   `arg:"--include-hidden" help:"Include hidden OS files"`
 	FollowSymlinks bool   `arg:"--follow-symlinks" help:"Follow symlinks"`
 	Concurrency    int    `arg:"--concurrency,-c" default:"0" help:"Number of concurrent transfers (0 = auto)"`
+	Rsync          bool   `arg:"--rsync" help:"Use direct SSH/Rsync instead of WebDAV (requires config.toml setup)"`
 
 	Init     *InitCmd     `arg:"subcommand:init"`
 	Login    *LoginCmd    `arg:"subcommand:login"`
@@ -176,6 +178,18 @@ func run() error {
 		return fmt.Errorf("no remote target configured")
 	}
 	execOpts.RemoteTarget = currentState.RemoteTarget
+
+	if cfg.Rsync.Enabled || args.Rsync {
+		if execOpts.Command == "status" {
+			return fmt.Errorf("status command is not supported with rsync")
+		}
+		if execOpts.Command == "sync" {
+			return fmt.Errorf("two-way sync is not natively supported by rsync. Please use 'nextdoor push' or 'nextdoor pull'")
+		}
+		
+		fmt.Println("Bypassing WebDAV and using direct SSH/Rsync transfer...")
+		return rsync.Run(&cfg.Rsync, currentState, execOpts.Command, execOpts.Target, execOpts.NoDelete, scanOpts.Ignores)
+	}
 
 	if args.Verbose {
 		fmt.Println("Scanning local directory...")

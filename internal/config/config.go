@@ -10,6 +10,21 @@ import (
 // Config represents the application configuration.
 type Config struct {
 	Webdav WebdavConfig `toml:"webdav"`
+	Rsync  RsyncConfig  `toml:"rsync"`
+}
+
+// RsyncConfig holds SSH and Rsync connection details for direct server syncing.
+type RsyncConfig struct {
+	Enabled   bool   `toml:"enabled"`
+	Host      string `toml:"host"`
+	Port      int    `toml:"port"`
+	User      string `toml:"user"`
+	KeyPath         string `toml:"key_path"`
+	DataDir         string   `toml:"data_dir"`
+	RsyncPath       string   `toml:"rsync_path"`
+	RemoteRsyncPath string   `toml:"remote_rsync_path"`
+	RsyncArgs       []string `toml:"rsync_args"`
+	OccCmd          string   `toml:"occ_cmd"`
 }
 
 // WebdavConfig holds the WebDAV connection details.

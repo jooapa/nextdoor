@@ -2,3 +2,16 @@
 url = "https://domain.tld/remote.php/webdav/"
 user = "your_username"
 password = "your_app_password"
+
+[rsync]
+# Set to true to bypass WebDAV and use direct SSH/Rsync for pushes and pulls
+enabled = false
+host = "domain.tld"
+port = 22
+user = "your_ssh_username"
+# Optional: path to your SSH private key
+key_path = "~/.ssh/id_rsa"
+# Absolute path to the user's Nextcloud files directory on the server
+data_dir = "/var/www/nextcloud/data/your_username/files"
+# Optional: command to run on the server after a push so Nextcloud detects the new files
+occ_cmd = "sudo -u www-data php /var/www/nextcloud/occ files:scan --all"
