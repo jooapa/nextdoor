@@ -15,9 +15,11 @@ services:
       - NET_RAW
     restart: unless-stopped
 
-  socat:
+  forwarder:
     image: alpine/socat:latest
-    container_name: nextcloud-socat
+    container_name: relay-forwarder
     network_mode: "service:tailscale-relay"
-    command: "tcp-listen:39472,fork,reuseaddr tcp-connect:100.x.x.x:8080"
+    depends_on:
+      - tailscale-relay
+    command: "tcp-listen:39472,fork,reuseaddr tcp-connect:100.x.x.x:80"
     restart: unless-stopped
