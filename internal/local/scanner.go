@@ -7,22 +7,33 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/jooapa/nextdoor/internal/state"
 	"github.com/zeebo/xxh3"
 )
 
+// ScannerOptions provides filtering for the scan process.
+type ScannerOptions struct {
+	Target        string
+	Ignores       []string
+	MaxSize       int64
+	IncludeHidden bool
+}
+
 // Scanner handles local filesystem operations.
 type Scanner struct {
 	BaseDir string
 	State   *state.State
+	Options ScannerOptions
 }
 
 // NewScanner creates a new scanner initialized with the base directory and current state.
-func NewScanner(baseDir string, currentState *state.State) *Scanner {
+func NewScanner(baseDir string, currentState *state.State, opts ScannerOptions) *Scanner {
 	return &Scanner{
 		BaseDir: baseDir,
 		State:   currentState,
+		Options: opts,
 	}
 }
 
@@ -40,13 +51,12 @@ func (s *Scanner) Scan() (map[string]state.FileInfo, error) {
 			return filepath.SkipDir
 		}
 
-		if d.IsDir() {
+		// Skip hidden files/directories if not included
+		if !s.Options.IncludeHidden && d.Name() != "." && strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return fmt.Errorf("failed to get file info for %s: %w", path, err)
 		}
 
 		relPath, err := filepath.Rel(s.BaseDir, path)
@@ -56,6 +66,49 @@ func (s *Scanner) Scan() (map[string]state.FileInfo, error) {
 
 		// Ensure consistent path separators (forward slash) for cross-platform compatibility
 		relPath = filepath.ToSlash(relPath)
+
+		// Target filtering
+		if s.Options.Target != "" {
+			targetSlash := filepath.ToSlash(s.Options.Target)
+			if relPath != targetSlash && !strings.HasPrefix(relPath, targetSlash+"/") {
+				if d.IsDir() {
+					// Need to descend if target is deeper
+					if relPath != "." && !strings.HasPrefix(targetSlash, relPath+"/") {
+						return filepath.SkipDir
+					}
+				} else {
+					return nil
+				}
+			}
+		}
+
+		// Ignores filtering
+		for _, ignore := range s.Options.Ignores {
+			matched, _ := filepath.Match(ignore, d.Name())
+			if !matched {
+				matched, _ = filepath.Match(ignore, relPath)
+			}
+			if matched {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return fmt.Errorf("failed to get file info for %s: %w", path, err)
+		}
+
+		// Max size filtering
+		if s.Options.MaxSize > 0 && info.Size() > s.Options.MaxSize {
+			return nil
+		}
 
 		hash, err := s.HashFileFastPath(path, relPath, info)
 		if err != nil {

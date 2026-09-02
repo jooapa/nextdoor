@@ -22,15 +22,37 @@ type ExecutionOptions struct {
 	NoDelete     bool
 	Strategy     string // "force-local" or "force-remote"
 	Command      string // "push", "pull", or "sync"
+	Target       string // specific file or directory to process
 }
 
 func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []FilePlan, opts ExecutionOptions) error {
+	if opts.Command == "status" {
+		fmt.Println("--- STATUS ---")
+		for _, action := range plan {
+			if opts.Target != "" && action.RelPath != opts.Target && !strings.HasPrefix(action.RelPath, opts.Target+"/") {
+				continue
+			}
+			fmt.Printf("[%s] %s\n", action.Action, action.RelPath)
+		}
+		return nil
+	}
+
 	if opts.DryRun {
-		fmt.Println("DRY RUN: No files will be changed.")
+		fmt.Println("DRY RUN: No files will be changed. Plan:")
+		for _, action := range plan {
+			if opts.Target != "" && action.RelPath != opts.Target && !strings.HasPrefix(action.RelPath, opts.Target+"/") {
+				continue
+			}
+			fmt.Printf("[%s] %s\n", action.Action, action.RelPath)
+		}
 		return nil
 	}
 
 	for _, action := range plan {
+		// Filter by target
+		if opts.Target != "" && action.RelPath != opts.Target && !strings.HasPrefix(action.RelPath, opts.Target+"/") {
+			continue
+		}
 		// Filter actions based on command
 		if opts.Command == "push" {
 			if action.Action == ActionPull || action.Action == ActionLocalDelete {
@@ -198,14 +220,14 @@ func performPull(client *gowebdav.Client, currentState *state.State, remoteRelPa
 
 	// Calculate new local hash
 	info, err := os.Stat(localPath)
-	if err == nil {
-		scanner := local.NewScanner(opts.BaseDir, currentState)
-		hash, _ := scanner.HashFileFastPath(localPath, localRelPath, info) // note: requires exported func or bypass. Wait, HashFileFastPath is unexported!
-		currentState.Files[localRelPath] = state.FileInfo{LocalXXHash3: hash, Size: info.Size(), ModTime: info.ModTime(), RemoteETag: remoteETag}
-		return state.Save(opts.BaseDir, currentState)
+	if err != nil {
+		return fmt.Errorf("failed to stat downloaded file: %w", err)
 	}
 	
-	return nil
+	scanner := local.NewScanner(opts.BaseDir, currentState, local.ScannerOptions{})
+	hash, _ := scanner.HashFileFastPath(localPath, localRelPath, info) // note: requires exported func or bypass. Wait, HashFileFastPath is unexported!
+	currentState.Files[localRelPath] = state.FileInfo{LocalXXHash3: hash, Size: info.Size(), ModTime: info.ModTime(), RemoteETag: remoteETag}
+	return state.Save(opts.BaseDir, currentState)
 }
 
 func executeRemoteDelete(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions) error {
