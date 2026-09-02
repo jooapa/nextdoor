@@ -7,9 +7,9 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/jooapa/nextdoor/internal/utils"
-	"github.com/schollz/progressbar/v3"
 
 	"github.com/jooapa/nextdoor/internal/local"
 	"github.com/jooapa/nextdoor/internal/nextcloud"
@@ -112,43 +112,67 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 	fmt.Printf("\nSummary: %d files to push (%s), %d files to pull (%s), %d remote deletes, %d local deletes, %d conflicts\n\n",
 		pushCount, utils.FormatBytes(pushSize), pullCount, utils.FormatBytes(pullSize), delRemoteCount, delLocalCount, conflictCount)
 
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(finalPlan))
+	sem := make(chan struct{}, 10) // Concurrency limit
+
 	for _, action := range finalPlan {
-		if action.Action == ActionConflict {
-			if opts.Command == "pull" || opts.Command == "sync" {
-				err := executePullConflict(client, currentState, action, opts)
-				if err != nil {
-					return fmt.Errorf("error processing %s: %w", action.RelPath, err)
+		action := action
+		
+		wg.Add(1)
+		sem <- struct{}{}
+		
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			
+			if action.Action == ActionConflict {
+				if opts.Command == "pull" || opts.Command == "sync" {
+					err := executePullConflict(client, currentState, action, opts, &mu)
+					if err != nil {
+						errCh <- fmt.Errorf("error processing %s: %w", action.RelPath, err)
+					}
 				}
+				return
 			}
-			continue
-		}
 
-		// Execute the finalized action
-		var err error
-		switch action.Action {
-		case ActionPush:
-			err = executePush(client, currentState, action, opts)
-		case ActionPull:
-			err = executePull(client, currentState, action, opts)
-		case ActionRemoteDelete:
-			if !opts.NoDelete {
-				err = executeRemoteDelete(client, currentState, action, opts)
-			} else {
-				fmt.Printf(" -> [SKIP REMOTE DELETE] %s (--no-delete active)\n", action.RelPath)
+			// Execute the finalized action
+			var err error
+			switch action.Action {
+			case ActionPush:
+				err = executePush(client, currentState, action, opts, &mu)
+			case ActionPull:
+				err = executePull(client, currentState, action, opts, &mu)
+			case ActionRemoteDelete:
+				if !opts.NoDelete {
+					err = executeRemoteDelete(client, currentState, action, opts, &mu)
+				} else {
+					fmt.Printf(" -> [SKIP REMOTE DELETE] %s (--no-delete active)\n", action.RelPath)
+				}
+			case ActionLocalDelete:
+				err = executeLocalDelete(currentState, action, opts, &mu)
 			}
-		case ActionLocalDelete:
-			err = executeLocalDelete(currentState, action, opts)
-		}
 
+			if err != nil {
+				errCh <- fmt.Errorf("error processing %s: %w", action.RelPath, err)
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
 		if err != nil {
-			return fmt.Errorf("error processing %s: %w", action.RelPath, err)
+			return err
 		}
 	}
 
 	return nil
 }
 
-func executePush(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions) error {
+func executePush(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions, mu *sync.Mutex) error {
 	localPath := filepath.Join(opts.BaseDir, action.RelPath)
 	remotePath := path.Join(opts.RemoteTarget, filepath.ToSlash(action.RelPath))
 
@@ -158,16 +182,10 @@ func executePush(client *gowebdav.Client, currentState *state.State, action File
 	}
 	defer f.Close()
 
-	infoLocal, err := f.Stat()
+	_, _ = f.Stat()
 	var reader io.Reader = f
-	var bar *progressbar.ProgressBar
-	if err == nil {
-		bar = progressbar.DefaultBytes(
-			infoLocal.Size(),
-			"Pushing "+action.RelPath,
-		)
-		reader = io.TeeReader(f, bar)
-	}
+	
+	fmt.Printf(" -> [PUSHING] %s\n", action.RelPath)
 
 	// Ensure remote directory exists
 	dir := path.Dir(remotePath)
@@ -178,15 +196,15 @@ func executePush(client *gowebdav.Client, currentState *state.State, action File
 	if err := nextcloud.AtomicUpload(client, remotePath, reader); err != nil {
 		return err
 	}
-	if bar != nil {
-		bar.Close()
-		fmt.Println()
-	}
+	fmt.Printf(" -> [PUSHED] %s\n", action.RelPath)
 
 	// Update state
+	mu.Lock()
+	defer mu.Unlock()
 	if currentState.Files == nil {
 		currentState.Files = make(map[string]state.FileInfo)
 	}
+
 	
 	// Fetch new remote ETag
 	info, err := client.Stat(remotePath)
@@ -207,17 +225,17 @@ func executePush(client *gowebdav.Client, currentState *state.State, action File
 	return state.Save(opts.BaseDir, currentState)
 }
 
-func executePull(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions) error {
-	return performPull(client, currentState, action, action.RelPath, opts)
+func executePull(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions, mu *sync.Mutex) error {
+	return performPull(client, currentState, action, action.RelPath, opts, mu)
 }
 
-func executePullConflict(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions) error {
+func executePullConflict(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions, mu *sync.Mutex) error {
 	conflictName := GenerateConflictFilename(action.RelPath)
 	fmt.Printf(" -> [CONFLICT] Pulling remote to %s\n", conflictName)
-	return performPull(client, currentState, action, conflictName, opts)
+	return performPull(client, currentState, action, conflictName, opts, mu)
 }
 
-func performPull(client *gowebdav.Client, currentState *state.State, action FilePlan, localRelPath string, opts ExecutionOptions) error {
+func performPull(client *gowebdav.Client, currentState *state.State, action FilePlan, localRelPath string, opts ExecutionOptions, mu *sync.Mutex) error {
 	remoteRelPath := action.RelPath
 	remoteETag := action.RemoteInfo.ETag
 	localPath := filepath.Join(opts.BaseDir, localRelPath)
@@ -240,12 +258,8 @@ func performPull(client *gowebdav.Client, currentState *state.State, action File
 		return err
 	}
 	
-	bar := progressbar.DefaultBytes(
-		action.RemoteInfo.Size,
-		"Pulling "+localRelPath,
-	)
-
-	if _, err := io.Copy(io.MultiWriter(f, bar), reader); err != nil {
+	fmt.Printf(" -> [PULLING] %s\n", localRelPath)
+	if _, err := io.Copy(f, reader); err != nil {
 		f.Close()
 		reader.Close()
 		os.Remove(partPath)
@@ -253,17 +267,19 @@ func performPull(client *gowebdav.Client, currentState *state.State, action File
 	}
 	reader.Close()
 	f.Close()
-	bar.Close()
-	fmt.Println()
+	fmt.Printf(" -> [PULLED] %s\n", localRelPath)
 
 	if err := os.Rename(partPath, localPath); err != nil {
 		return err
 	}
 
 	// Update state
+	mu.Lock()
+	defer mu.Unlock()
 	if currentState.Files == nil {
 		currentState.Files = make(map[string]state.FileInfo)
 	}
+
 
 	// Calculate new local hash
 	info, err := os.Stat(localPath)
@@ -277,7 +293,7 @@ func performPull(client *gowebdav.Client, currentState *state.State, action File
 	return state.Save(opts.BaseDir, currentState)
 }
 
-func executeRemoteDelete(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions) error {
+func executeRemoteDelete(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions, mu *sync.Mutex) error {
 	fmt.Printf(" -> [REMOTE DELETE] %s\n", action.RelPath)
 	remotePath := path.Join(opts.RemoteTarget, filepath.ToSlash(action.RelPath))
 	
@@ -286,11 +302,13 @@ func executeRemoteDelete(client *gowebdav.Client, currentState *state.State, act
 		return err
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
 	delete(currentState.Files, action.RelPath)
 	return state.Save(opts.BaseDir, currentState)
 }
 
-func executeLocalDelete(currentState *state.State, action FilePlan, opts ExecutionOptions) error {
+func executeLocalDelete(currentState *state.State, action FilePlan, opts ExecutionOptions, mu *sync.Mutex) error {
 	fmt.Printf(" -> [LOCAL DELETE] %s\n", action.RelPath)
 	localPath := filepath.Join(opts.BaseDir, action.RelPath)
 	
@@ -299,6 +317,8 @@ func executeLocalDelete(currentState *state.State, action FilePlan, opts Executi
 		return err
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
 	delete(currentState.Files, action.RelPath)
 	return state.Save(opts.BaseDir, currentState)
 }
