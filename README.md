@@ -42,7 +42,7 @@ These flags can be appended to any command above to alter the global behavior of
 
 ---
 
-## Advanced & "Exotic" Scenarios
+## Scenarios
 
 ### 1. The First Push (Git-style)
 If you initialized a local folder without specifying a remote target, you must define where the files should go on your very first push. The target folder on Nextcloud **must be empty or non-existent**.
