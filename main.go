@@ -120,6 +120,7 @@ func run() error {
 	
 	var scanOpts local.ScannerOptions
 	scanOpts.IncludeHidden = args.IncludeHidden
+	scanOpts.FollowSymlinks = args.FollowSymlinks
 
 	if args.Status != nil {
 		execOpts.Command = "status"

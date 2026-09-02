@@ -18,7 +18,8 @@ type ScannerOptions struct {
 	Target        string
 	Ignores       []string
 	MaxSize       int64
-	IncludeHidden bool
+	IncludeHidden  bool
+	FollowSymlinks bool
 }
 
 // Scanner handles local filesystem operations.
@@ -40,20 +41,44 @@ func NewScanner(baseDir string, currentState *state.State, opts ScannerOptions) 
 // Scan traverses the local directory and returns a map of all files and their computed state.
 func (s *Scanner) Scan() (map[string]state.FileInfo, error) {
 	currentFiles := make(map[string]state.FileInfo)
+	visitedSymlinks := make(map[string]bool)
 
-	err := filepath.WalkDir(s.BaseDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	var walk func(path string, d fs.DirEntry, info fs.FileInfo) error
+	walk = func(path string, d fs.DirEntry, info fs.FileInfo) error {
+		isDir := d.IsDir()
+		var err error
+
+		// Handle symlinks
+		if info.Mode()&os.ModeSymlink != 0 {
+			if !s.Options.FollowSymlinks {
+				return nil // Skip symlinks if not following
+			}
+			targetInfo, err := os.Stat(path)
+			if err != nil {
+				return nil // Skip broken symlinks silently
+			}
+			absPath, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return nil
+			}
+			if visitedSymlinks[absPath] {
+				return nil // Prevent infinite loops
+			}
+			visitedSymlinks[absPath] = true
+			
+			// Override info and isDir to target's metadata
+			info = targetInfo
+			isDir = targetInfo.IsDir()
 		}
 
 		// Skip the internal .nextdoor directory
-		if d.IsDir() && d.Name() == state.StateDir {
+		if isDir && d.Name() == state.StateDir {
 			return filepath.SkipDir
 		}
 
 		// Skip hidden files/directories if not included
 		if !s.Options.IncludeHidden && d.Name() != "." && strings.HasPrefix(d.Name(), ".") {
-			if d.IsDir() {
+			if isDir {
 				return filepath.SkipDir
 			}
 			return nil
@@ -63,16 +88,13 @@ func (s *Scanner) Scan() (map[string]state.FileInfo, error) {
 		if err != nil {
 			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
 		}
-
-		// Ensure consistent path separators (forward slash) for cross-platform compatibility
 		relPath = filepath.ToSlash(relPath)
 
 		// Target filtering
 		if s.Options.Target != "" {
 			targetSlash := filepath.ToSlash(s.Options.Target)
 			if relPath != targetSlash && !strings.HasPrefix(relPath, targetSlash+"/") {
-				if d.IsDir() {
-					// Need to descend if target is deeper
+				if isDir {
 					if relPath != "." && !strings.HasPrefix(targetSlash, relPath+"/") {
 						return filepath.SkipDir
 					}
@@ -86,23 +108,36 @@ func (s *Scanner) Scan() (map[string]state.FileInfo, error) {
 		for _, ignore := range s.Options.Ignores {
 			matched, _ := filepath.Match(ignore, d.Name())
 			if !matched {
+		fmt.Println("visiting:", path)
 				matched, _ = filepath.Match(ignore, relPath)
 			}
 			if matched {
-				if d.IsDir() {
+				if isDir {
 					return filepath.SkipDir
 				}
 				return nil
 			}
 		}
 
-		if d.IsDir() {
+		if isDir {
+			entries, err := os.ReadDir(path)
+			if err != nil {
+				return err
+			}
+			for _, entry := range entries {
+				entryInfo, err := entry.Info()
+				if err != nil {
+					continue
+				}
+				entryPath := filepath.Join(path, entry.Name())
+				err = walk(entryPath, entry, entryInfo)
+				if err == filepath.SkipDir {
+					continue
+				} else if err != nil {
+					return err
+				}
+			}
 			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return fmt.Errorf("failed to get file info for %s: %w", path, err)
 		}
 
 		// Max size filtering
@@ -115,7 +150,6 @@ func (s *Scanner) Scan() (map[string]state.FileInfo, error) {
 			return fmt.Errorf("failed to process file %s: %w", relPath, err)
 		}
 
-		// ETag will be populated/preserved during the reconciliation phase.
 		currentFiles[relPath] = state.FileInfo{
 			LocalXXHash3: hash,
 			Size:         info.Size(),
@@ -123,9 +157,17 @@ func (s *Scanner) Scan() (map[string]state.FileInfo, error) {
 		}
 
 		return nil
-	})
+	}
 
+	rootInfo, err := os.Lstat(s.BaseDir)
 	if err != nil {
+		return nil, fmt.Errorf("failed to stat base dir: %w", err)
+	}
+	
+	// Create a dummy DirEntry for the root
+	rootEntry := fs.FileInfoToDirEntry(rootInfo)
+	
+	if err := walk(s.BaseDir, rootEntry, rootInfo); err != nil {
 		return nil, fmt.Errorf("failed to scan local directory: %w", err)
 	}
 

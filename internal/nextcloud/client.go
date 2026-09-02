@@ -14,14 +14,13 @@ func NewClient(cfg *config.Config) *gowebdav.Client {
 	client := gowebdav.NewClient(cfg.Webdav.URL, cfg.Webdav.User, cfg.Webdav.Password)
 	
 	// Optimize HTTP transport for high concurrency and speed
-	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 100,
-		MaxConnsPerHost:     100,
-		IdleConnTimeout:     90 * time.Second,
-		ForceAttemptHTTP2:   true,
-	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 100
+	transport.MaxConnsPerHost = 100
+	transport.IdleConnTimeout = 90 * time.Second
 	client.SetTransport(transport)
+	client.SetTimeout(30 * time.Second)
 	
 	return client
 }
