@@ -35,7 +35,7 @@ nextdoor sync [target]                  # Performs a two-way sync (push and pull
 ### Global Flags
 These flags can be appended to any command above to alter the global behavior of the sync engine:
 
-* `--config <path>`: Specifies a custom `config.toml` file to use instead of the default.
+* `--config <path>`: Specifies a custom `config.toml` file to use instead of the default. If omitted, checks for `.nextdoor/config.toml` before falling back to the executable directory.
 * `--verbose` / `-v`: Prints detailed, real-time logging of what the engine is doing.
 * `--include-hidden`: Include OS hidden files (e.g., `.DS_Store`, `desktop.ini`, `.swp`) which are skipped by default.
 * `--follow-symlinks`: Tells the engine to follow and sync the targets of symlinks instead of ignoring them.

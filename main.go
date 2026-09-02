@@ -93,8 +93,13 @@ func run() error {
 
 	configPath := args.Config
 	if configPath == "" {
-		exePath, _ := os.Executable()
-		configPath = filepath.Join(filepath.Dir(exePath), "config.toml")
+		localConfig := filepath.Join(".nextdoor", "config.toml")
+		if _, err := os.Stat(localConfig); err == nil {
+			configPath = localConfig
+		} else {
+			exePath, _ := os.Executable()
+			configPath = filepath.Join(filepath.Dir(exePath), "config.toml")
+		}
 	}
 
 	cfg, err := config.Load(configPath)
