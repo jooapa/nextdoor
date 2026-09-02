@@ -1,0 +1,4 @@
+[webdav]
+url = "https://domain.tld/remote.php/webdav/"
+user = "your_username"
+password = "your_app_password"

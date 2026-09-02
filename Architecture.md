@@ -24,3 +24,8 @@ To ensure efficient lookups and robust state tracking during syncing, the schema
   }
 }
 ```
+
+
+## COnnection to nextcloud
+
+App uses thr webdav protocol to connect to nextcloud. 
