@@ -224,7 +224,7 @@ func executePush(client *gowebdav.Client, currentState *state.State, action File
 	}
 
 	start := time.Now()
-	if err := nextcloud.AtomicUpload(client, remotePath, reader); err != nil {
+	if err := nextcloud.AtomicUpload(client, remotePath, reader, action.LocalInfo.Size); err != nil {
 		return err
 	}
 	duration := time.Since(start)

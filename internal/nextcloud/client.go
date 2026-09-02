@@ -2,6 +2,8 @@ package nextcloud
 
 import (
 	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/jooapa/nextdoor/internal/config"
 	"github.com/studio-b12/gowebdav"
@@ -11,8 +13,15 @@ import (
 func NewClient(cfg *config.Config) *gowebdav.Client {
 	client := gowebdav.NewClient(cfg.Webdav.URL, cfg.Webdav.User, cfg.Webdav.Password)
 	
-	// Optional: If testing locally without valid SSL, uncomment:
-	// client.SetTransport(gowebdav.InsecureTransport())
+	// Optimize HTTP transport for high concurrency and speed
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		MaxConnsPerHost:     100,
+		IdleConnTimeout:     90 * time.Second,
+		ForceAttemptHTTP2:   true,
+	}
+	client.SetTransport(transport)
 	
 	return client
 }
