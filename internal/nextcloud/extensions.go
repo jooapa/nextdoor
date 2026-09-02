@@ -78,19 +78,19 @@ func fetchTree(client *gowebdav.Client, currentPath, relPath string, files map[s
 	return nil
 }
 
-// AtomicUpload safely uploads a file using a .part extension, then renames it via WebDAV MOVE.
+// AtomicUpload safely uploads a file using a .nextdoor-tmp extension, then renames it via WebDAV MOVE.
 // This prevents interrupted transfers from resulting in corrupted files and invalid ETags on the server.
 func AtomicUpload(client *gowebdav.Client, remotePath string, reader io.Reader) error {
-	partPath := remotePath + ".part"
+	partPath := remotePath + ".nextdoor-tmp"
 
-	// 1. Upload to the temporary .part file stream
+	// 1. Upload to the temporary .nextdoor-tmp file stream
 	if err := client.WriteStream(partPath, reader, 0644); err != nil {
 		// Attempt cleanup on failure, ignore errors during cleanup
 		_ = client.Remove(partPath)
-		return fmt.Errorf("failed to stream upload to .part file for %s: %w", remotePath, err)
+		return fmt.Errorf("failed to stream upload to .nextdoor-tmp file for %s: %w", remotePath, err)
 	}
 
-	// 2. Rename (MOVE) .part to final destination atomically
+	// 2. Rename (MOVE) .nextdoor-tmp to final destination atomically
 	// The gowebdav Rename method issues a WebDAV MOVE command with Overwrite: T
 	if err := client.Rename(partPath, remotePath, true); err != nil {
 		return fmt.Errorf("failed to execute atomic MOVE for %s: %w", remotePath, err)

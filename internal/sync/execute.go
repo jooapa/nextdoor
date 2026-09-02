@@ -188,7 +188,7 @@ func performPull(client *gowebdav.Client, currentState *state.State, remoteRelPa
 		return err
 	}
 
-	partPath := localPath + ".part"
+	partPath := localPath + ".nextdoor-tmp"
 	f, err := os.Create(partPath)
 	if err != nil {
 		return err
