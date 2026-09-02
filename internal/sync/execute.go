@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jooapa/nextdoor/internal/utils"
 
@@ -115,7 +116,7 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(finalPlan))
-	sem := make(chan struct{}, 10) // Concurrency limit
+	sem := make(chan struct{}, 15) // Concurrency limit
 
 	for _, action := range finalPlan {
 		action := action
@@ -172,6 +173,30 @@ func ExecutePlan(client *gowebdav.Client, currentState *state.State, plan []File
 	return nil
 }
 
+
+type progressReader struct {
+	r          io.Reader
+	total      int64
+	read       int64
+	relPath    string
+	lastPrint  time.Time
+	mu         sync.Mutex
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.r.Read(p)
+	pr.mu.Lock()
+	pr.read += int64(n)
+	now := time.Now()
+	if pr.total > 0 && now.Sub(pr.lastPrint) > 1*time.Second && pr.read < pr.total {
+		pr.lastPrint = now
+		percent := float64(pr.read) / float64(pr.total) * 100
+		fmt.Printf(" -> [PROGRESS] %s (%.1f%%)\n", pr.relPath, percent)
+	}
+	pr.mu.Unlock()
+	return n, err
+}
+
 func executePush(client *gowebdav.Client, currentState *state.State, action FilePlan, opts ExecutionOptions, mu *sync.Mutex) error {
 	localPath := filepath.Join(opts.BaseDir, action.RelPath)
 	remotePath := path.Join(opts.RemoteTarget, filepath.ToSlash(action.RelPath))
@@ -182,8 +207,13 @@ func executePush(client *gowebdav.Client, currentState *state.State, action File
 	}
 	defer f.Close()
 
-	_, _ = f.Stat()
-	var reader io.Reader = f
+	infoLocal, _ := f.Stat()
+	var reader io.Reader = &progressReader{
+		r:         f,
+		total:     infoLocal.Size(),
+		relPath:   action.RelPath,
+		lastPrint: time.Now(),
+	}
 	
 	fmt.Printf(" -> [PUSHING] %s\n", action.RelPath)
 
@@ -193,10 +223,16 @@ func executePush(client *gowebdav.Client, currentState *state.State, action File
 		// Ignore errors on MkdirAll as it might exist
 	}
 
+	start := time.Now()
 	if err := nextcloud.AtomicUpload(client, remotePath, reader); err != nil {
 		return err
 	}
-	fmt.Printf(" -> [PUSHED] %s\n", action.RelPath)
+	duration := time.Since(start)
+	speed := float64(action.LocalInfo.Size) / duration.Seconds()
+	if duration.Seconds() == 0 {
+		speed = float64(action.LocalInfo.Size) // Avoid division by zero
+	}
+	fmt.Printf(" -> [PUSHED] %s (%s/s)\n", action.RelPath, utils.FormatBytes(int64(speed)))
 
 	// Update state
 	mu.Lock()
@@ -259,15 +295,29 @@ func performPull(client *gowebdav.Client, currentState *state.State, action File
 	}
 	
 	fmt.Printf(" -> [PULLING] %s\n", localRelPath)
-	if _, err := io.Copy(f, reader); err != nil {
+	start := time.Now()
+	
+	progReader := &progressReader{
+		r:         reader,
+		total:     action.RemoteInfo.Size,
+		relPath:   localRelPath,
+		lastPrint: time.Now(),
+	}
+	
+	if _, err := io.Copy(f, progReader); err != nil {
 		f.Close()
 		reader.Close()
 		os.Remove(partPath)
 		return err
 	}
+	duration := time.Since(start)
+	speed := float64(action.RemoteInfo.Size) / duration.Seconds()
+	if duration.Seconds() == 0 {
+		speed = float64(action.RemoteInfo.Size)
+	}
 	reader.Close()
 	f.Close()
-	fmt.Printf(" -> [PULLED] %s\n", localRelPath)
+	fmt.Printf(" -> [PULLED] %s (%s/s)\n", localRelPath, utils.FormatBytes(int64(speed)))
 
 	if err := os.Rename(partPath, localPath); err != nil {
 		return err
