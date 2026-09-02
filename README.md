@@ -51,7 +51,7 @@ To bypass this bottleneck, `nextdoor` features a **Smart Rsync Mode**. When enab
 5. Re-fetch the new ETags via WebDAV and lock them into the local `.nextdoor` state database.
 
 ### How to Enable Rsync Mode
-Rsync mode is configured via your `config.toml`. See `config.example.toml` for a full list of available options.
+Rsync mode is configured via your `config.toml`.
 
 ```toml
 [rsync]
